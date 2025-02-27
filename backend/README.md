@@ -1,25 +1,24 @@
 # Healthcare Translation Backend
 
-This project implements a FastAPI-based backend for a healthcare translation web app. It uses OpenAI's Whisper for speech-to-text transcription and OpenAI's API for real-time translation. The app is designed to support medical terminology and provide a robust foundation for a multilingual, healthcare-focused application.
+This project implements a FastAPI-based backend for a healthcare translation web app. It uses OpenAI's Whisper for audio transcription and OpenAI's API for real-time translation. The design focuses on real-time, multilingual translation between patients and healthcare providers.
 
 ## Features
 
-- **Audio Transcription:** Uses OpenAI's Whisper to transcribe spoken audio.
-- **Real-Time Translation:** Leverages OpenAI's API for accurate text translation.
-- **Modular Structure:** Organized code into modules (API endpoints, services, models, and utilities) for easy maintenance and scalability.
-- **Security & Environment Management:** Sensitive keys are managed via a `.env` file and excluded from version control.
-- **CORS Support:** Configured for cross-origin resource sharing, suitable for front-end integration.
+- **Voice-to-Text with Generative AI:** Uses OpenAI's Whisper to transcribe spoken input, with enhanced handling of medical terminology.
+- **Real-Time Translation:** Leverages OpenAI's API to translate transcripts on the fly. The `/translate` endpoint accepts the source and target languages as query parameters.
+- **Modular Structure:** Organized into endpoints, services, models, and utilities for maintainability.
+- **Security & Environment Management:** Sensitive data (API keys) are managed using a `.env` file (excluded from version control).
+- **Cross-Origin Support:** Configured CORS for seamless integration with frontend applications.
 
-## Getting Started
-
-### Prerequisites
+## Prerequisites
 
 - Python 3.8 or higher.
+- [ffmpeg](https://ffmpeg.org/download.html) installed and available on your PATH.
 - An OpenAI API key.
 
-### Setup
+## Setup
 
-1. **Clone the Repository:**
+1. **Clone the repository:**
 
    ```bash
    git clone <repository_url>

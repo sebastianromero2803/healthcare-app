@@ -2,5 +2,4 @@ fastapi[standard]
 pydantic
 uvicorn[standard]
 openai
-whisper
 python-multipart

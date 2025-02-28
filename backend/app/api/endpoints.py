@@ -1,10 +1,44 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException, Query
+from pydantic import BaseModel
+from typing import List
+import datetime
 from app.models.request_models import TranslationRequest
 from app.services import transcription, translation, text_to_speech
 from fastapi.responses import StreamingResponse
 import io
 
 router = APIRouter()
+
+conversation_store = {}
+
+class ConversationSnippet(BaseModel):
+    original_text: str
+    translated_text: str
+
+@router.post("/conversation/{session_id}")
+async def add_conversation_snippet(session_id: str, snippet: ConversationSnippet):
+    """
+    Adds a snippet (original text + translated text) to the conversation for a specific session ID.
+    """
+    if session_id not in conversation_store:
+        conversation_store[session_id] = []
+
+    # Append snippet to that session's list
+    conversation_store[session_id].append({
+        "original_text": snippet.original_text,
+        "translated_text": snippet.translated_text,
+        "timestamp": datetime.datetime.now().isoformat()
+    })
+    return {"message": f"Snippet added to session {session_id}."}
+
+@router.get("/conversation/{session_id}")
+async def get_conversation(session_id: str):
+    """
+    Retrieves the entire conversation transcript for the given session ID.
+    """
+    if session_id not in conversation_store:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    return {"session_id": session_id, "conversation": conversation_store[session_id]}
 
 @router.post("/transcribe")
 async def transcribe_audio(

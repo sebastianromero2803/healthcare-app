@@ -1,6 +1,8 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException, Query
-from models.request_models import TranslationRequest
-from services import transcription, translation
+from app.models.request_models import TranslationRequest
+from app.services import transcription, translation, text_to_speech
+from fastapi.responses import StreamingResponse
+import io
 
 router = APIRouter()
 
@@ -31,3 +33,22 @@ async def translate_text(
         return {"translation": translated_text}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Translation error: {e}")
+
+@router.post("/synthesize_speech")
+async def synthesize_speech(
+    payload: TranslationRequest,  # The request payload containing the text to convert
+    voice: str = Query("alloy", description="The voice to be used (e.g. Alloy)"),  # The voice or language to be used (e.g., "en_us", "es", "alloy")
+    prompt: str = Query(None, description="Optional prompt to improve speech synthesis accuracy (e.g., medical terms)"),  # Optional prompt to improve speech synthesis accuracy
+):
+    try:
+        # Convert text to speech
+        audio_data = await text_to_speech.text_to_speech_function(payload.text, voice=voice, prompt=prompt)
+
+        with open("output.mp3", "wb") as f:
+            f.write(audio_data)
+        # Return the audio data as a streaming response
+        return StreamingResponse(io.BytesIO(audio_data), media_type="audio/mp3")
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Text-to-Speech conversion failed: {str(e)}")
+

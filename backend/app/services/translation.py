@@ -23,6 +23,7 @@ async def translate_text(text: str, source_language: str, target_language: str) 
                 "Your task is to translate text from the source language to the target language, "
                 "with a focus on accuracy in medical terminology. "
                 "Return only the translated text, with no additional commentary."
+                "Make sure the text makes sense, is well structured and has no grammatical or syntactical errors."
             )
         },
         {
@@ -35,7 +36,7 @@ async def translate_text(text: str, source_language: str, target_language: str) 
     ]
     
     response = openai.chat.completions.create(
-        model="gpt-4o-mini",  # Change this as needed (e.g. to gpt-4o if available)
+        model="gpt-4o",  # Change this as needed (e.g. to gpt-4o if available)
         messages=messages,
         max_tokens=500,
         temperature=0.3,

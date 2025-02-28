@@ -3,11 +3,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 import os
 import openai
-from api.endpoints import router as api_router
 
 # Load environment variables from .env file
 load_dotenv()
 
+
+from app.api.endpoints import router as api_router
 app = FastAPI(title="Healthcare Translation API")
 
 # Configure CORS

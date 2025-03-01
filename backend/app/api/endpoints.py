@@ -78,8 +78,6 @@ async def synthesize_speech(
         # Convert text to speech
         audio_data = await text_to_speech.text_to_speech_function(payload.text, voice=voice, prompt=prompt)
 
-        with open("output.mp3", "wb") as f:
-            f.write(audio_data)
         # Return the audio data as a streaming response
         return StreamingResponse(io.BytesIO(audio_data), media_type="audio/mp3")
         

@@ -1,108 +1,338 @@
 "use client"
 
-import { useState, useRef } from "react"
-import { Play, Download, Clock, Loader2, FileText } from "lucide-react"
+import { useState, useRef, useEffect } from "react"
+import { v4 as uuidv4 } from "uuid"
+import { Mic, MicOff, Loader2, RefreshCw, Info, Volume2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { ScrollArea } from "@/components/ui/scroll-area"
+import { Card, CardContent } from "@/components/ui/card"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import ConversationTranscript from "@/components/conversation-transcript"
 import { useToast } from "./use-toast"
-import { LANGUAGES, TTS_CONFIG, ROLES, type Role } from "@/lib/api-config"
-import { fetchWithRetry } from "@/lib/fetch-with-retry"
-import { ERROR_MESSAGES } from "@/lib/error-messages"
-import { generatePDF } from "@/lib/pdf-generator"
+import { Toaster } from "@/components/ui/toaster"
+import { API_BASE_URL, LANGUAGES, MEDICAL_PROMPTS, ERROR_MESSAGES, ROLES, type Role } from "@/lib/api-config"
+import { LanguageRoleSelector } from "./language-role-selector"
 
-interface ConversationSnippet {
-  original_text: string
-  translated_text: string
-  timestamp: string
-  source_role: Role
+const fetchWithRetry = async (url: string, options: RequestInit, retries = 3) => {
+  try {
+    const response = await fetch(url, options)
+    if (!response.ok) {
+      if (retries > 0 && response.status >= 500) {
+        console.log(`Retrying ${url}, ${retries} retries remaining`)
+        await new Promise((resolve) => setTimeout(resolve, 1000)) // Wait 1 second before retrying
+        return fetchWithRetry(url, options, retries - 1)
+      } else {
+        throw new Error(`HTTP error! status: ${response.status}`)
+      }
+    }
+    return response
+  } catch (error) {
+    if (retries > 0) {
+      console.log(`Retrying ${url} after error: ${error}, ${retries} retries remaining`)
+      await new Promise((resolve) => setTimeout(resolve, 1000)) // Wait 1 second before retrying
+      return fetchWithRetry(url, options, retries - 1)
+    } else {
+      throw error
+    }
+  }
 }
 
-interface ConversationTranscriptProps {
-  conversation: ConversationSnippet[]
-  doctorLanguage: string
-  patientLanguage: string
-  apiBaseUrl: string
-  medicalPrompt: string
+const TTS_CONFIG = {
+  chunkSize: 200,
+  voices: {
+    es: "es-ES-Neural",
+    fr: "fr-FR-Neural",
+    de: "de-DE-Neural",
+    // Add more languages and voices as needed
+  },
 }
 
-export default function ConversationTranscript({
-  conversation,
-  doctorLanguage,
-  patientLanguage,
-  apiBaseUrl,
-  medicalPrompt,
-}: ConversationTranscriptProps) {
-  const [playingIndex, setPlayingIndex] = useState<number | null>(null)
-  const [isDownloading, setIsDownloading] = useState(false)
-  const [downloadFormat, setDownloadFormat] = useState<"pdf" | "md">("pdf")
+export default function TranslationInterface() {
+  // State
+  const [sessionId, setSessionId] = useState("")
+  const [isRecording, setIsRecording] = useState(false)
+  const [isProcessing, setIsProcessing] = useState(false)
+  const [sourceLanguage, setSourceLanguage] = useState("en")
+  const [targetLanguage, setTargetLanguage] = useState("es")
+  const [originalText, setOriginalText] = useState("")
+  const [translatedText, setTranslatedText] = useState("")
+  const [conversation, setConversation] = useState<any[]>([])
+  const [isPlaying, setIsPlaying] = useState(false)
+  const [recordingTime, setRecordingTime] = useState(0)
+  const [connectionStatus, setConnectionStatus] = useState<"checking" | "connected" | "error">("checking")
+  const [currentRole, setCurrentRole] = useState<Role>(ROLES.DOCTOR)
+  const [doctorLanguage, setDoctorLanguage] = useState("en")
+  const [patientLanguage, setPatientLanguage] = useState("es")
+
+  // Refs
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const audioChunksRef = useRef<Blob[]>([])
   const audioRef = useRef<HTMLAudioElement | null>(null)
+  const recordingTimerRef = useRef<NodeJS.Timeout | null>(null)
+
   const { toast } = useToast()
 
-  // Format timestamp
-  const formatTimestamp = (timestamp: string) => {
+  // Check backend connection
+  useEffect(() => {
+    const checkConnection = async () => {
+      try {
+        const response = await fetchWithRetry(`${API_BASE_URL}/`, {
+          method: "GET",
+          headers: {
+            Accept: "application/json",
+          },
+        })
+        if (response.ok) {
+          setConnectionStatus("connected")
+          toast({
+            title: "Connected to backend",
+            description: "Successfully connected to the translation service",
+          })
+        }
+      } catch (error) {
+        console.error("Backend connection error:", error)
+        setConnectionStatus("error")
+        const errorMessage =
+          error instanceof Error && error.message.includes("Unauthorized")
+            ? ERROR_MESSAGES.unauthorized
+            : ERROR_MESSAGES.connectionError
+        toast({
+          variant: "destructive",
+          title: "Connection error",
+          description: errorMessage,
+        })
+      }
+    }
+
+    checkConnection()
+  }, [toast])
+
+  // Initialize session
+  useEffect(() => {
+    const newSessionId = uuidv4()
+    setSessionId(newSessionId)
+    console.log(`New session created: ${newSessionId}`)
+  }, [])
+
+  // Fetch conversation history when session changes
+  useEffect(() => {
+    if (sessionId && connectionStatus === "connected") {
+      fetchConversation()
+    }
+  }, [sessionId, connectionStatus])
+
+  // Handle audio playback
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.onended = () => {
+        setIsPlaying(false)
+      }
+    }
+  }, [])
+
+  // Cleanup recording timer on unmount
+  useEffect(() => {
+    return () => {
+      if (recordingTimerRef.current) {
+        clearInterval(recordingTimerRef.current)
+      }
+    }
+  }, [])
+
+  // Fetch conversation history
+  const fetchConversation = async () => {
     try {
-      const date = new Date(timestamp)
-      return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+      const response = await fetch(`${API_BASE_URL}/conversation/${sessionId}`)
+      if (response.ok) {
+        const data = await response.json()
+        setConversation(data.conversation || [])
+      }
     } catch (error) {
-      return "Unknown time"
+      console.error("Error fetching conversation:", error)
     }
   }
 
-  // Format date
-  const formatDate = (timestamp: string) => {
+  // Start recording
+  const startRecording = async () => {
     try {
-      const date = new Date(timestamp)
-      return date.toLocaleDateString([], {
-        year: "numeric",
-        month: "short",
-        day: "numeric",
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" })
+      mediaRecorderRef.current = mediaRecorder
+      audioChunksRef.current = []
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data)
+        }
+      }
+
+      mediaRecorder.onstop = handleRecordingStop
+      mediaRecorder.start(1000) // Collect data every second
+      setIsRecording(true)
+      setRecordingTime(0)
+
+      // Start timer
+      recordingTimerRef.current = setInterval(() => {
+        setRecordingTime((prev) => prev + 1)
+      }, 1000)
+
+      toast({
+        title: "Recording started",
+        description: "Speak clearly into your microphone",
       })
     } catch (error) {
-      return "Unknown date"
+      console.error("Error starting recording:", error)
+      toast({
+        variant: "destructive",
+        title: "Recording failed",
+        description: ERROR_MESSAGES.microphoneAccess,
+      })
+    }
+  }
+
+  // Stop recording
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop()
+      setIsRecording(false)
+
+      // Stop all audio tracks
+      mediaRecorderRef.current.stream.getTracks().forEach((track) => track.stop())
+
+      // Clear timer
+      if (recordingTimerRef.current) {
+        clearInterval(recordingTimerRef.current)
+        recordingTimerRef.current = null
+      }
+    }
+  }
+
+  // Format recording time
+  const formatRecordingTime = (seconds: number) => {
+    const mins = Math.floor(seconds / 60)
+    const secs = seconds % 60
+    return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`
+  }
+
+  // Handle recording stop
+  const handleRecordingStop = async () => {
+    setIsProcessing(true)
+
+    try {
+      // Convert to webm format which is more widely supported
+      const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm;codecs=opus" })
+      const formData = new FormData()
+      formData.append("file", audioBlob, "recording.webm")
+      formData.append("prompt", MEDICAL_PROMPTS.transcription)
+
+      // Transcribe audio with retry logic
+      const transcriptionResponse = await fetchWithRetry(`${API_BASE_URL}/transcribe`, {
+        method: "POST",
+        body: formData,
+      })
+
+      const transcriptionData = await transcriptionResponse.json()
+      const transcribedText = transcriptionData.transcript
+      setOriginalText(transcribedText)
+
+      // Determine source and target languages based on current role
+      const sourceLanguage = currentRole === ROLES.DOCTOR ? doctorLanguage : patientLanguage
+      const targetLanguage = currentRole === ROLES.DOCTOR ? patientLanguage : doctorLanguage
+
+      // Translate text with retry logic
+      const translationResponse = await fetchWithRetry(
+        `${API_BASE_URL}/translate?source_language=${sourceLanguage}&target_language=${targetLanguage}`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            text: transcribedText,
+            prompt: MEDICAL_PROMPTS.translation,
+          }),
+        },
+      )
+
+      const translationData = await translationResponse.json()
+      setTranslatedText(translationData.translation)
+
+      // Add to conversation with correct role and language information
+      await addToConversation(transcribedText, translationData.translation)
+
+      toast({
+        title: "Processing complete",
+        description: "Your speech has been transcribed and translated",
+      })
+    } catch (error) {
+      console.error("Error processing audio:", error)
+      toast({
+        variant: "destructive",
+        title: "Processing failed",
+        description:
+          error instanceof Error
+            ? `Error: ${error.message}`
+            : "Network error occurred. Please check your connection and try again.",
+      })
+    } finally {
+      setIsProcessing(false)
     }
   }
 
   // Play translated text
-  const playTranslatedText = async (text: string, index: number) => {
-    if (!text) return
+  const playTranslatedText = async () => {
+    if (!translatedText) return
 
-    setPlayingIndex(index)
+    setIsPlaying(true)
     let audioUrl: string | null = null
 
     try {
-      const response = await fetchWithRetry(`${apiBaseUrl}/synthesize_speech`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "audio/mpeg",
-        },
-        body: JSON.stringify({
-          text,
-          prompt: medicalPrompt,
-          voice:
-            patientLanguage in TTS_CONFIG.voices
-              ? TTS_CONFIG.voices[patientLanguage as keyof typeof TTS_CONFIG.voices]
-              : "alloy",
-        }),
-      })
+      // Determine target language based on current role
+      const targetLanguage = currentRole === ROLES.DOCTOR ? patientLanguage : doctorLanguage
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}))
-        throw new Error(errorData.detail || `Server error: ${response.status}`)
+      // Split long text into chunks if needed
+      const textChunks =
+        translatedText.length > TTS_CONFIG.chunkSize
+          ? splitTextIntoChunks(translatedText, TTS_CONFIG.chunkSize)
+          : [translatedText]
+
+      const audioChunks: Blob[] = []
+
+      // Process each chunk
+      for (const chunk of textChunks) {
+        const response = await fetchWithRetry(`${API_BASE_URL}/synthesize_speech`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "audio/mpeg",
+          },
+          body: JSON.stringify({
+            text: chunk,
+            prompt: MEDICAL_PROMPTS.textToSpeech,
+            voice: TTS_CONFIG.voices[targetLanguage] || "alloy",
+          }),
+        })
+
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}))
+          throw new Error(errorData.detail || `Server error: ${response.status}`)
+        }
+
+        const audioBlob = await response.blob()
+        if (audioBlob.size === 0) {
+          throw new Error("Received empty audio data")
+        }
+
+        audioChunks.push(audioBlob)
       }
 
-      const audioBlob = await response.blob()
-      if (audioBlob.size === 0) {
-        throw new Error("Received empty audio data")
-      }
-
-      audioUrl = URL.createObjectURL(audioBlob)
+      // Combine audio chunks
+      const combinedBlob = new Blob(audioChunks, { type: "audio/mpeg" })
+      audioUrl = URL.createObjectURL(combinedBlob)
 
       if (audioRef.current) {
         audioRef.current.src = audioUrl
         audioRef.current.onended = () => {
-          setPlayingIndex(null)
+          setIsPlaying(false)
           if (audioUrl) URL.revokeObjectURL(audioUrl)
         }
         audioRef.current.onerror = (e) => {
@@ -113,7 +343,7 @@ export default function ConversationTranscript({
       }
     } catch (error) {
       console.error("Error playing audio:", error)
-      setPlayingIndex(null)
+      setIsPlaying(false)
 
       if (audioUrl) URL.revokeObjectURL(audioUrl)
 
@@ -130,256 +360,237 @@ export default function ConversationTranscript({
     }
   }
 
-  // Download transcript
-  const downloadTranscript = async () => {
-    if (conversation.length === 0) {
-      toast({
-        variant: "destructive",
-        title: "No conversation to download",
-        description: "Record some conversation first",
-      })
-      return
-    }
+  // Helper function to split text into chunks
+  const splitTextIntoChunks = (text: string, chunkSize: number): string[] => {
+    const chunks: string[] = []
+    let currentChunk = ""
 
-    setIsDownloading(true)
+    // Split by sentences to avoid cutting in the middle
+    const sentences = text.match(/[^.!?]+[.!?]+/g) || [text]
 
-    try {
-      const data = {
-        title: "Healthcare Translation Transcript",
-        generated: new Date().toLocaleString(),
-        doctorLanguage: getLanguageName(doctorLanguage),
-        patientLanguage: getLanguageName(patientLanguage),
-        conversation: conversation.map((snippet) => ({
-          ...snippet,
-          timestamp: formatTimestamp(snippet.timestamp),
-          date: formatDate(snippet.timestamp),
-          role: snippet.source_role === ROLES.DOCTOR ? "Healthcare Provider" : "Patient",
-        })),
-      }
-
-      if (downloadFormat === "pdf") {
-        await generatePDF(data)
+    for (const sentence of sentences) {
+      if ((currentChunk + sentence).length <= chunkSize) {
+        currentChunk += sentence
       } else {
-        // Generate Markdown
-        let content = `# ${data.title}\n\n`
-        content += `Generated: ${data.generated}\n\n`
-        content += `Healthcare Provider's Language: ${data.doctorLanguage}\n`
-        content += `Patient's Language: ${data.patientLanguage}\n\n`
-
-        // Group by date
-        const groupedByDate = conversation.reduce(
-          (acc, snippet) => {
-            const date = formatDate(snippet.timestamp)
-            if (!acc[date]) {
-              acc[date] = []
-            }
-            acc[date].push(snippet)
-            return acc
-          },
-          {} as Record<string, ConversationSnippet[]>,
-        )
-
-        // Generate content by date
-        Object.entries(groupedByDate).forEach(([date, snippets]) => {
-          content += `## ${date}\n\n`
-
-          snippets.forEach((snippet, index) => {
-            const timestamp = formatTimestamp(snippet.timestamp)
-            const role = snippet.source_role === ROLES.DOCTOR ? "Healthcare Provider" : "Patient"
-            content += `### Entry ${index + 1} - ${timestamp} (${role})\n\n`
-            content += `#### Original (${
-              snippet.source_role === ROLES.DOCTOR ? data.doctorLanguage : data.patientLanguage
-            })\n${snippet.original_text}\n\n`
-            content += `#### Translation (${
-              snippet.source_role === ROLES.DOCTOR ? data.patientLanguage : data.doctorLanguage
-            })\n${snippet.translated_text}\n\n`
-            content += "---\n\n"
-          })
-        })
-
-        // Add copyright
-        content +=
-          "© " + new Date().getFullYear() + " Healthcare Translation by Sebastian Romero. All rights reserved.\n"
-
-        const blob = new Blob([content], { type: "text/markdown" })
-        const url = URL.createObjectURL(blob)
-        const a = document.createElement("a")
-        a.href = url
-        a.download = `medical-translation-transcript-${new Date().toISOString().slice(0, 10)}.md`
-        document.body.appendChild(a)
-        a.click()
-        document.body.removeChild(a)
-        URL.revokeObjectURL(url)
+        if (currentChunk) chunks.push(currentChunk.trim())
+        currentChunk = sentence
       }
+    }
 
-      toast({
-        title: "Transcript downloaded",
-        description: `Your conversation transcript has been saved as ${downloadFormat.toUpperCase()}`,
+    if (currentChunk) chunks.push(currentChunk.trim())
+    return chunks
+  }
+
+  // Add to conversation
+  const addToConversation = async (original: string, translated: string) => {
+    try {
+      await fetchWithRetry(`${API_BASE_URL}/conversation/${sessionId}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          original_text: original,
+          translated_text: translated,
+          source_role: currentRole,
+        }),
       })
+
+      // Update local conversation state
+      setConversation((prev) => [
+        ...prev,
+        {
+          original_text: original,
+          translated_text: translated,
+          timestamp: new Date().toISOString(),
+          source_role: currentRole,
+        },
+      ])
     } catch (error) {
-      console.error("Error downloading transcript:", error)
+      console.error("Error adding to conversation:", error)
+      // Still update local state even if server fails
+      setConversation((prev) => [
+        ...prev,
+        {
+          original_text: original,
+          translated_text: translated,
+          timestamp: new Date().toISOString(),
+          source_role: currentRole,
+        },
+      ])
+
       toast({
         variant: "destructive",
-        title: "Download failed",
-        description: "Could not download the transcript. Please try again.",
+        title: "Sync error",
+        description: "Could not save to server, but your conversation is saved locally.",
       })
-    } finally {
-      setIsDownloading(false)
     }
   }
 
-  // Get language name from code
-  const getLanguageName = (code: string) => {
-    const language = LANGUAGES.find((lang) => lang.code === code)
-    return language?.name || code
+  // Swap languages
+  const swapLanguages = () => {
+    setDoctorLanguage(patientLanguage)
+    setPatientLanguage(doctorLanguage)
   }
 
-  // Group conversations by date
-  const groupedConversations = conversation.reduce(
-    (acc, snippet) => {
-      try {
-        const date = formatDate(snippet.timestamp)
-        if (!acc[date]) {
-          acc[date] = []
-        }
-        acc[date].push(snippet)
-        return acc
-      } catch (error) {
-        // Handle invalid dates
-        const fallbackDate = "Unknown Date"
-        if (!acc[fallbackDate]) {
-          acc[fallbackDate] = []
-        }
-        acc[fallbackDate].push(snippet)
-        return acc
-      }
-    },
-    {} as Record<string, ConversationSnippet[]>,
-  )
+  // Get language medical note
+  const getMedicalNote = (code: string) => {
+    const language = LANGUAGES.find((lang) => lang.code === code)
+    return language?.medicalNote || ""
+  }
 
   return (
-    <Card>
-      <CardHeader className="flex flex-row items-center justify-between">
-        <CardTitle>Conversation History</CardTitle>
-        <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setDownloadFormat("md")}
-            className={downloadFormat === "md" ? "bg-secondary" : ""}
-          >
-            <FileText className="h-4 w-4 mr-2" />
-            Markdown
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setDownloadFormat("pdf")}
-            className={downloadFormat === "pdf" ? "bg-secondary" : ""}
-          >
-            <FileText className="h-4 w-4 mr-2" />
-            PDF
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={downloadTranscript}
-            disabled={isDownloading || conversation.length === 0}
-          >
-            {isDownloading ? (
-              <>
-                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                Downloading...
-              </>
-            ) : (
-              <>
-                <Download className="h-4 w-4 mr-2" />
-                Download
-              </>
-            )}
-          </Button>
-        </div>
-      </CardHeader>
-      <CardContent>
-        {conversation.length === 0 ? (
-          <div className="text-center py-8 text-gray-500">
-            <p>No conversation recorded yet.</p>
-            <p className="text-sm">Start recording to see your transcript here.</p>
+    <div className="space-y-6">
+      {connectionStatus === "error" && (
+        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-md mb-4">
+          <div className="flex items-center">
+            <Info className="h-5 w-5 mr-2" />
+            <p>
+              <strong>Connection Error:</strong> Could not connect to the translation service. The application will work
+              in demo mode with limited functionality.
+            </p>
           </div>
-        ) : (
-          <ScrollArea className="h-[400px] pr-4">
-            <div className="space-y-6">
-              {Object.entries(groupedConversations).map(([date, snippets]) => (
-                <div key={date} className="space-y-4">
-                  <div className="sticky top-0 bg-white z-10 py-2 flex items-center">
-                    <div className="text-sm font-medium text-gray-700 bg-gray-100 px-3 py-1 rounded-full">{date}</div>
-                  </div>
+        </div>
+      )}
 
-                  {snippets.map((snippet, index) => {
-                    const globalIndex = conversation.findIndex(
-                      (s) => s.original_text === snippet.original_text && s.timestamp === snippet.timestamp,
-                    )
-                    const isDoctor = snippet.source_role === ROLES.DOCTOR
-                    const sourceLanguage = isDoctor ? doctorLanguage : patientLanguage
-                    const targetLanguage = isDoctor ? patientLanguage : doctorLanguage
+      <Card className="shadow-md">
+        <CardContent className="p-6">
+          <div className="flex flex-col md:flex-row gap-4 mb-6">
+            <LanguageRoleSelector
+              role={ROLES.DOCTOR}
+              language={doctorLanguage}
+              onLanguageChange={setDoctorLanguage}
+              label="Healthcare Provider's Language"
+              tooltip="Select the language used by the healthcare provider"
+            />
 
-                    return (
-                      <div key={`${date}-${index}`} className="border-b pb-4 last:border-0">
-                        <div className="flex items-center justify-between text-sm text-gray-500 mb-2">
-                          <div className="flex items-center">
-                            <Clock className="h-3 w-3 mr-1" />
-                            <span>{formatTimestamp(snippet.timestamp)}</span>
-                          </div>
-                          <span className="text-xs font-medium px-2 py-1 bg-blue-50 text-blue-700 rounded">
-                            {isDoctor ? "Healthcare Provider" : "Patient"}
-                          </span>
-                        </div>
-
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                          <div className="bg-blue-50 p-3 rounded-md">
-                            <div className="text-xs font-medium text-blue-700 mb-1">
-                              {getLanguageName(sourceLanguage)}
-                            </div>
-                            <p className="text-sm">{snippet.original_text}</p>
-                          </div>
-
-                          <div className="bg-green-50 p-3 rounded-md">
-                            <div className="flex justify-between items-center mb-1">
-                              <div className="text-xs font-medium text-green-700">
-                                {getLanguageName(targetLanguage)}
-                              </div>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                className="h-6 w-6 p-0"
-                                onClick={() => playTranslatedText(snippet.translated_text, globalIndex)}
-                                disabled={playingIndex !== null}
-                              >
-                                {playingIndex === globalIndex ? (
-                                  <Loader2 className="h-3 w-3 animate-spin" />
-                                ) : (
-                                  <Play className="h-3 w-3" />
-                                )}
-                                <span className="sr-only">Play</span>
-                              </Button>
-                            </div>
-                            <p className="text-sm">{snippet.translated_text}</p>
-                            {playingIndex === globalIndex && (
-                              <div className="mt-1 text-xs text-green-700">Playing...</div>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    )
-                  })}
-                </div>
-              ))}
+            <div className="flex items-end justify-center">
+              <Button variant="ghost" size="icon" onClick={swapLanguages} className="mb-2">
+                <RefreshCw className="h-5 w-5" />
+              </Button>
             </div>
-          </ScrollArea>
-        )}
-      </CardContent>
+
+            <LanguageRoleSelector
+              role={ROLES.PATIENT}
+              language={patientLanguage}
+              onLanguageChange={setPatientLanguage}
+              label="Patient's Language"
+              tooltip="Select the language used by the patient"
+            />
+          </div>
+
+          <div className="flex justify-center mb-6">
+            <div className="inline-flex rounded-lg border p-1">
+              <Button
+                variant={currentRole === ROLES.DOCTOR ? "secondary" : "ghost"}
+                size="sm"
+                onClick={() => setCurrentRole(ROLES.DOCTOR)}
+              >
+                Healthcare Provider
+              </Button>
+              <Button
+                variant={currentRole === ROLES.PATIENT ? "secondary" : "ghost"}
+                size="sm"
+                onClick={() => setCurrentRole(ROLES.PATIENT)}
+              >
+                Patient
+              </Button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="space-y-2">
+              <div className="flex justify-between items-center">
+                <h3 className="text-lg font-medium">Original</h3>
+                <div className="flex items-center gap-2">
+                  {isRecording && (
+                    <span className="text-sm font-medium text-red-500 animate-pulse">
+                      {formatRecordingTime(recordingTime)}
+                    </span>
+                  )}
+                  <Button
+                    variant={isRecording ? "destructive" : "outline"}
+                    size="sm"
+                    onClick={isRecording ? stopRecording : startRecording}
+                    disabled={isProcessing}
+                  >
+                    {isRecording ? (
+                      <>
+                        <MicOff className="h-4 w-4 mr-2" />
+                        Stop
+                      </>
+                    ) : (
+                      <>
+                        <Mic className="h-4 w-4 mr-2" />
+                        Record
+                      </>
+                    )}
+                  </Button>
+                </div>
+              </div>
+              <div className="min-h-[150px] p-4 rounded-md border bg-gray-50">
+                {isProcessing ? (
+                  <div className="flex justify-center items-center h-full">
+                    <Loader2 className="h-6 w-6 animate-spin text-blue-600" />
+                    <span className="ml-2 text-blue-800">Processing...</span>
+                  </div>
+                ) : (
+                  <p className="whitespace-pre-wrap">{originalText}</p>
+                )}
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex justify-between items-center">
+                <h3 className="text-lg font-medium">Translated</h3>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={playTranslatedText}
+                  disabled={!translatedText || isPlaying}
+                >
+                  {isPlaying ? (
+                    <>
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                      Playing...
+                    </>
+                  ) : (
+                    <>
+                      <Volume2 className="h-4 w-4 mr-2" />
+                      Play
+                    </>
+                  )}
+                </Button>
+              </div>
+              <div className="min-h-[150px] p-4 rounded-md border bg-gray-50">
+                <p className="whitespace-pre-wrap">{translatedText}</p>
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Tabs defaultValue="transcript">
+        <TabsList className="grid w-full grid-cols-1">
+          <TabsTrigger value="transcript">Conversation Transcript</TabsTrigger>
+        </TabsList>
+        <TabsContent value="transcript" className="mt-4">
+          <ConversationTranscript
+            conversation={conversation.map((item) => ({
+              ...item,
+              source_role: item.source_role || currentRole, // Fallback for existing items
+            }))}
+            doctorLanguage={doctorLanguage}
+            patientLanguage={patientLanguage}
+            apiBaseUrl={API_BASE_URL}
+            medicalPrompt={MEDICAL_PROMPTS.textToSpeech}
+          />
+        </TabsContent>
+      </Tabs>
+
       <audio ref={audioRef} className="hidden" />
-    </Card>
+      <Toaster />
+    </div>
   )
 }
 

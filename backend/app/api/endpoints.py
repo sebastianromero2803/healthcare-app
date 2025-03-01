@@ -70,17 +70,37 @@ async def translate_text(
 
 @router.post("/synthesize_speech")
 async def synthesize_speech(
-    payload: TranslationRequest,  # The request payload containing the text to convert
-    voice: str = Query("alloy", description="The voice to be used (e.g. Alloy)"),  # The voice or language to be used (e.g., "en_us", "es", "alloy")
-    prompt: str = Query(None, description="Optional prompt to improve speech synthesis accuracy (e.g., medical terms)"),  # Optional prompt to improve speech synthesis accuracy
+    payload: TranslationRequest,
+    voice: str = Query("alloy", description="The voice to be used (e.g. Alloy)"),
+    prompt: str = Query(None, description="Optional prompt to improve speech synthesis accuracy"),
 ):
     try:
+        # Validate input
+        if not payload.text or len(payload.text.strip()) == 0:
+            raise HTTPException(status_code=400, detail="Text cannot be empty")
+            
         # Convert text to speech
-        audio_data = await text_to_speech.text_to_speech_function(payload.text, voice=voice, prompt=prompt)
-
-        # Return the audio data as a streaming response
-        return StreamingResponse(io.BytesIO(audio_data), media_type="audio/mp3")
+        audio_data = await text_to_speech.text_to_speech_function(
+            payload.text.strip(), 
+            voice=voice, 
+            prompt=prompt
+        )
         
+        # Return the audio data directly as a streaming response
+        return StreamingResponse(
+            io.BytesIO(audio_data), 
+            media_type="audio/mpeg",
+            headers={
+                "Content-Disposition": "attachment; filename=speech.mp3",
+                "Cache-Control": "no-cache"
+            }
+        )
+        
+    except HTTPException as he:
+        raise he
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Text-to-Speech conversion failed: {str(e)}")
-
+        print(f"TTS Error: {str(e)}")  # Log the error
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Text-to-Speech conversion failed: {str(e)}"
+        )

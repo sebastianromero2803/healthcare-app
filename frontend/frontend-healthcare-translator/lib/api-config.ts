@@ -1,4 +1,3 @@
-// API configuration
 export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "https://backend-healthcare-translator.vercel.app"
 
 export const API_CONFIG = {

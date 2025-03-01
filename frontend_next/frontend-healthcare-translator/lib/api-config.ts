@@ -1,6 +1,5 @@
 // API configuration
-export const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL || "https://backend-healthcare-translator-dklpsazbu-magnus-col.vercel.app"
+export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "https://backend-healthcare-translator.vercel.app"
 
 export const API_CONFIG = {
   headers: {
@@ -11,38 +10,26 @@ export const API_CONFIG = {
   mode: "cors" as RequestMode,
   credentials: "include" as RequestCredentials,
   retries: 3,
-  retryDelay: 1000, // 1 second
+  retryDelay: 1000,
 }
 
-export async function fetchWithRetry(url: string, options: RequestInit, retries = API_CONFIG.retries) {
-  try {
-    const response = await fetch(url, {
-      ...options,
-      mode: API_CONFIG.mode,
-      credentials: API_CONFIG.credentials,
-      headers: {
-        ...API_CONFIG.headers,
-        ...options.headers,
-      },
-    })
-
-    if (response.status === 401) {
-      throw new Error("Unauthorized: Please check your authentication credentials")
-    }
-
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`)
-    }
-
-    return response
-  } catch (error) {
-    if (retries > 0 && error instanceof Error && !error.message.includes("Unauthorized")) {
-      await new Promise((resolve) => setTimeout(resolve, API_CONFIG.retryDelay))
-      return fetchWithRetry(url, options, retries - 1)
-    }
-    throw error
-  }
-}
+export const TTS_CONFIG = {
+  maxRetries: 3,
+  retryDelay: 1000,
+  chunkSize: 1000,
+  voices: {
+    en: "alloy",
+    es: "nova",
+    fr: "alloy",
+    de: "alloy",
+    zh: "nova",
+    ar: "alloy",
+    ru: "alloy",
+    hi: "nova",
+    pt: "alloy",
+    ja: "nova",
+  } as const,
+} as const
 
 // Medical-specific prompts to improve API responses
 export const MEDICAL_PROMPTS = {
@@ -70,6 +57,14 @@ export const LANGUAGES = [
   { code: "ja", name: "Japanese", medicalNote: "Uses specific medical kanji and terminology" },
 ]
 
+// Role-specific language configuration
+export const ROLES = {
+  DOCTOR: "doctor",
+  PATIENT: "patient",
+} as const
+
+export type Role = (typeof ROLES)[keyof typeof ROLES]
+
 // Error messages
 export const ERROR_MESSAGES = {
   microphoneAccess:
@@ -81,5 +76,7 @@ export const ERROR_MESSAGES = {
   sessionError: "Could not create or retrieve session. Please refresh the page.",
   unauthorized: "Authentication required. Please check your credentials or contact support.",
   connectionError: "Could not connect to the translation service. Please check your internet connection.",
+  ttsError: "Text-to-speech conversion failed. The text might be too long or contain unsupported characters.",
+  networkError: "Network error occurred. Please check your connection and try again.",
 }
 

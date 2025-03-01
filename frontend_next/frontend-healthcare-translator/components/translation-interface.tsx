@@ -6,12 +6,11 @@ import { Mic, MicOff, Loader2, RefreshCw, Info, Volume2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import ConversationTranscript from "@/components/conversation-transcript"
 import { useToast } from "./use-toast"
 import { Toaster } from "@/components/ui/toaster"
-import { API_BASE_URL, LANGUAGES, MEDICAL_PROMPTS, ERROR_MESSAGES } from "@/lib/api-config"
+import { API_BASE_URL, LANGUAGES, MEDICAL_PROMPTS, ERROR_MESSAGES, ROLES, type Role } from "@/lib/api-config"
+import { LanguageRoleSelector } from "./language-role-selector"
 
 const fetchWithRetry = async (url: string, options: RequestInit, retries = 3) => {
   try {
@@ -37,6 +36,16 @@ const fetchWithRetry = async (url: string, options: RequestInit, retries = 3) =>
   }
 }
 
+const TTS_CONFIG = {
+  chunkSize: 200,
+  voices: {
+    es: "es-ES-Neural",
+    fr: "fr-FR-Neural",
+    de: "de-DE-Neural",
+    // Add more languages and voices as needed
+  },
+}
+
 export default function TranslationInterface() {
   // State
   const [sessionId, setSessionId] = useState("")
@@ -50,6 +59,9 @@ export default function TranslationInterface() {
   const [isPlaying, setIsPlaying] = useState(false)
   const [recordingTime, setRecordingTime] = useState(0)
   const [connectionStatus, setConnectionStatus] = useState<"checking" | "connected" | "error">("checking")
+  const [currentRole, setCurrentRole] = useState<Role>(ROLES.DOCTOR)
+  const [doctorLanguage, setDoctorLanguage] = useState("en")
+  const [patientLanguage, setPatientLanguage] = useState("es")
 
   // Refs
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
@@ -267,36 +279,99 @@ export default function TranslationInterface() {
     if (!translatedText) return
 
     setIsPlaying(true)
+    let audioUrl: string | null = null
 
     try {
-      const response = await fetchWithRetry(`${API_BASE_URL}/synthesize_speech`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          text: translatedText,
-          prompt: MEDICAL_PROMPTS.textToSpeech,
-        }),
-      })
+      // Split long text into chunks if needed
+      const textChunks =
+        translatedText.length > TTS_CONFIG.chunkSize
+          ? splitTextIntoChunks(translatedText, TTS_CONFIG.chunkSize)
+          : [translatedText]
 
-      const audioBlob = await response.blob()
-      const audioUrl = URL.createObjectURL(audioBlob)
+      const audioChunks: Blob[] = []
+
+      // Process each chunk
+      for (const chunk of textChunks) {
+        const response = await fetchWithRetry(`${API_BASE_URL}/synthesize_speech`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "audio/mpeg",
+          },
+          body: JSON.stringify({
+            text: chunk,
+            prompt: MEDICAL_PROMPTS.textToSpeech,
+            voice: TTS_CONFIG.voices[targetLanguage] || "alloy",
+          }),
+        })
+
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}))
+          throw new Error(errorData.detail || `Server error: ${response.status}`)
+        }
+
+        const audioBlob = await response.blob()
+        if (audioBlob.size === 0) {
+          throw new Error("Received empty audio data")
+        }
+
+        audioChunks.push(audioBlob)
+      }
+
+      // Combine audio chunks
+      const combinedBlob = new Blob(audioChunks, { type: "audio/mpeg" })
+      audioUrl = URL.createObjectURL(combinedBlob)
 
       if (audioRef.current) {
         audioRef.current.src = audioUrl
-        audioRef.current.play()
+        audioRef.current.onended = () => {
+          setIsPlaying(false)
+          if (audioUrl) URL.revokeObjectURL(audioUrl)
+        }
+        audioRef.current.onerror = (e) => {
+          console.error("Audio playback error:", e)
+          throw new Error("Audio playback failed")
+        }
+        await audioRef.current.play()
       }
     } catch (error) {
       console.error("Error playing audio:", error)
       setIsPlaying(false)
 
+      if (audioUrl) URL.revokeObjectURL(audioUrl)
+
       toast({
         variant: "destructive",
         title: "Playback failed",
-        description: error instanceof Error ? `Error: ${error.message}` : "Could not play the audio. Please try again.",
+        description:
+          error instanceof Error
+            ? error.message.includes("Server error")
+              ? ERROR_MESSAGES.ttsError
+              : error.message
+            : ERROR_MESSAGES.networkError,
       })
     }
+  }
+
+  // Helper function to split text into chunks
+  const splitTextIntoChunks = (text: string, chunkSize: number): string[] => {
+    const chunks: string[] = []
+    let currentChunk = ""
+
+    // Split by sentences to avoid cutting in the middle
+    const sentences = text.match(/[^.!?]+[.!?]+/g) || [text]
+
+    for (const sentence of sentences) {
+      if ((currentChunk + sentence).length <= chunkSize) {
+        currentChunk += sentence
+      } else {
+        if (currentChunk) chunks.push(currentChunk.trim())
+        currentChunk = sentence
+      }
+    }
+
+    if (currentChunk) chunks.push(currentChunk.trim())
+    return chunks
   }
 
   // Add to conversation
@@ -310,6 +385,7 @@ export default function TranslationInterface() {
         body: JSON.stringify({
           original_text: original,
           translated_text: translated,
+          source_role: currentRole,
         }),
       })
 
@@ -320,6 +396,7 @@ export default function TranslationInterface() {
           original_text: original,
           translated_text: translated,
           timestamp: new Date().toISOString(),
+          source_role: currentRole,
         },
       ])
     } catch (error) {
@@ -331,6 +408,7 @@ export default function TranslationInterface() {
           original_text: original,
           translated_text: translated,
           timestamp: new Date().toISOString(),
+          source_role: currentRole,
         },
       ])
 
@@ -344,8 +422,8 @@ export default function TranslationInterface() {
 
   // Swap languages
   const swapLanguages = () => {
-    setSourceLanguage(targetLanguage)
-    setTargetLanguage(sourceLanguage)
+    setDoctorLanguage(patientLanguage)
+    setPatientLanguage(doctorLanguage)
   }
 
   // Get language medical note
@@ -371,35 +449,13 @@ export default function TranslationInterface() {
       <Card className="shadow-md">
         <CardContent className="p-6">
           <div className="flex flex-col md:flex-row gap-4 mb-6">
-            <div className="flex-1 space-y-2">
-              <div className="flex items-center justify-between">
-                <label className="text-sm font-medium">Source Language</label>
-                <TooltipProvider>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button variant="ghost" size="sm" className="h-5 w-5 p-0">
-                        <Info className="h-4 w-4" />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      <p className="max-w-xs">{getMedicalNote(sourceLanguage)}</p>
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
-              </div>
-              <Select value={sourceLanguage} onValueChange={setSourceLanguage}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select language" />
-                </SelectTrigger>
-                <SelectContent>
-                  {LANGUAGES.map((lang) => (
-                    <SelectItem key={lang.code} value={lang.code}>
-                      {lang.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+            <LanguageRoleSelector
+              role={ROLES.DOCTOR}
+              language={doctorLanguage}
+              onLanguageChange={setDoctorLanguage}
+              label="Healthcare Provider's Language"
+              tooltip="Select the language used by the healthcare provider"
+            />
 
             <div className="flex items-end justify-center">
               <Button variant="ghost" size="icon" onClick={swapLanguages} className="mb-2">
@@ -407,34 +463,31 @@ export default function TranslationInterface() {
               </Button>
             </div>
 
-            <div className="flex-1 space-y-2">
-              <div className="flex items-center justify-between">
-                <label className="text-sm font-medium">Target Language</label>
-                <TooltipProvider>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button variant="ghost" size="sm" className="h-5 w-5 p-0">
-                        <Info className="h-4 w-4" />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      <p className="max-w-xs">{getMedicalNote(targetLanguage)}</p>
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
-              </div>
-              <Select value={targetLanguage} onValueChange={setTargetLanguage}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select language" />
-                </SelectTrigger>
-                <SelectContent>
-                  {LANGUAGES.map((lang) => (
-                    <SelectItem key={lang.code} value={lang.code}>
-                      {lang.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+            <LanguageRoleSelector
+              role={ROLES.PATIENT}
+              language={patientLanguage}
+              onLanguageChange={setPatientLanguage}
+              label="Patient's Language"
+              tooltip="Select the language used by the patient"
+            />
+          </div>
+
+          <div className="flex justify-center mb-6">
+            <div className="inline-flex rounded-lg border p-1">
+              <Button
+                variant={currentRole === ROLES.DOCTOR ? "secondary" : "ghost"}
+                size="sm"
+                onClick={() => setCurrentRole(ROLES.DOCTOR)}
+              >
+                Healthcare Provider
+              </Button>
+              <Button
+                variant={currentRole === ROLES.PATIENT ? "secondary" : "ghost"}
+                size="sm"
+                onClick={() => setCurrentRole(ROLES.PATIENT)}
+              >
+                Patient
+              </Button>
             </div>
           </div>
 
@@ -516,9 +569,12 @@ export default function TranslationInterface() {
         </TabsList>
         <TabsContent value="transcript" className="mt-4">
           <ConversationTranscript
-            conversation={conversation}
-            sourceLanguage={sourceLanguage}
-            targetLanguage={targetLanguage}
+            conversation={conversation.map((item) => ({
+              ...item,
+              source_role: item.source_role || currentRole, // Fallback for existing items
+            }))}
+            doctorLanguage={doctorLanguage}
+            patientLanguage={patientLanguage}
             apiBaseUrl={API_BASE_URL}
             medicalPrompt={MEDICAL_PROMPTS.textToSpeech}
           />
